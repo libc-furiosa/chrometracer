@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+    "chrometracer",
+    "chrometracer-attributes",
+    "examples/instrument"
+]
