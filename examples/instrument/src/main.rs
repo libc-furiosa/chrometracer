@@ -3,13 +3,13 @@ use std::{
     time::Duration,
 };
 
-#[chrometracer::instrument(name = "hello0")]
+#[chrometracer::instrument(name = format!("{}", "hello"), tid = 1)]
 fn hello() {
     println!("Hello");
 }
 
 fn main() {
-    chrometracer::builder().init();
+    let _guard = chrometracer::builder().init();
 
     let mut handles = vec![];
     for _ in 0..10 {
