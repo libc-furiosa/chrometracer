@@ -26,6 +26,7 @@ pub struct ChromeTracer {
     sender: Option<Sender<ChromeTracerMessage>>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum ChromeTracerMessage {
     ChromeEvent(ChromeEvent),
     Terminate,
@@ -76,19 +77,12 @@ impl ChromeTracer {
 
             io::Write::write_all(&mut file, b"[\n").unwrap();
 
-            loop {
-                match receiver.recv() {
-                    Ok(ChromeTracerMessage::ChromeEvent(event)) => {
-                        let s = serde_json::to_string(&event).unwrap();
-                        if let Some(e) = queue.force_push(s) {
-                            io::Write::write_all(&mut file, e.as_bytes()).unwrap();
-                            io::Write::write_all(&mut file, b",\n").unwrap();
-                        };
-                    }
-                    Ok(ChromeTracerMessage::Terminate) | Err(_) => {
-                        break;
-                    }
-                }
+            while let Ok(ChromeTracerMessage::ChromeEvent(event)) = receiver.recv() {
+                let s = serde_json::to_string(&event).unwrap();
+                if let Some(e) = queue.force_push(s) {
+                    io::Write::write_all(&mut file, e.as_bytes()).unwrap();
+                    io::Write::write_all(&mut file, b",\n").unwrap();
+                };
             }
 
             if let Some(e) = queue.pop() {
@@ -115,9 +109,9 @@ where
     F: FnMut(&ChromeTracer) -> T,
 {
     CURRENT.with(|c| {
-        let tracer = c.borrow();
+        let mut tracer = c.borrow_mut();
         if tracer.is_none() {
-            *c.borrow_mut() = unsafe { GLOBAL.clone() };
+            *tracer = unsafe { GLOBAL.clone() };
         }
 
         f(tracer.as_ref().unwrap())
