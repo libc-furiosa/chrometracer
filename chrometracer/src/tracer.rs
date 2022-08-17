@@ -106,7 +106,7 @@ impl ChromeTracer {
 
 pub fn current<T, F>(mut f: F) -> T
 where
-    F: FnMut(&ChromeTracer) -> T,
+    F: FnMut(Option<&ChromeTracer>) -> T,
 {
     CURRENT.with(|c| {
         let mut tracer = c.borrow_mut();
@@ -114,7 +114,7 @@ where
             *tracer = unsafe { GLOBAL.clone() };
         }
 
-        f(tracer.as_ref().unwrap())
+        f(tracer.as_ref())
     })
 }
 
@@ -123,16 +123,18 @@ macro_rules! event {
     ($($key:ident = $value:expr),*) => {
 
         $crate::current(|tracer| {
-            use $crate::Recordable as _;
+            if let Some(tracer) = tracer {
+                use $crate::Recordable as _;
 
-            let mut builder = $crate::ChromeEvent::builder(tracer.start);
+                let mut builder = $crate::ChromeEvent::builder(tracer.start);
 
-            $(
-                $value.record(&mut builder, stringify!($key));
-            )*;
+                $(
+                    $value.record(&mut builder, stringify!($key));
+                )*
 
-            let event = builder.pid(100).build().unwrap();
-            tracer.trace(event);
+                let event = builder.pid(100).build().unwrap();
+                tracer.trace(event);
+            }
         })
     };
 }
@@ -207,15 +209,15 @@ impl Recordable for EventType {
 
 #[cfg(test)]
 mod tests {
-    use tracing_chrometrace::EventType;
-
-    use super::*;
-    use std::{borrow::Cow, collections::HashSet};
-
     #[test]
     fn event() {
         crate::builder().init();
 
+        event!(name = "hello");
+    }
+
+    #[test]
+    fn without_init() {
         event!(name = "hello");
     }
 }

@@ -59,17 +59,21 @@ pub fn instrument(attr: TokenStream, item: TokenStream) -> TokenStream {
     if let syn::Item::Fn(ref mut item) = input {
         let original = &item.block;
         item.block = Box::new(parse_quote! {{
-            let start = chrometracer::current(|tracer| tracer.start);
+            let start = chrometracer::current(|tracer| tracer.map(|t| t.start));
 
-            let now = ::std::time::Instant::now();
+            if let Some(start) = start {
+                let now = ::std::time::Instant::now();
 
-            let ts = now.duration_since(start).as_nanos() as f64 / 1000.0;
-            let ret = #original;
-            let dur = ::std::time::Instant::now().duration_since(now).as_nanos() as f64 / 1000.0;
+                let ts = now.duration_since(start).as_nanos() as f64 / 1000.0;
+                let ret = #original;
+                let dur = ::std::time::Instant::now().duration_since(now).as_nanos() as f64 / 1000.0;
 
-            chrometracer::event!(#(#args ,)* ph = chrometracer::EventType::Complete, dur = dur, ts = ts);
+                chrometracer::event!(#(#args ,)* ph = chrometracer::EventType::Complete, dur = dur, ts = ts);
 
-            ret
+                ret
+            } else {
+                #original
+            }
         }});
     } else {
         unreachable!()

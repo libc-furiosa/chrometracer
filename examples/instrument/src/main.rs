@@ -9,7 +9,7 @@ fn hello() {
 }
 
 fn main() {
-    let _guard = chrometracer::builder().init();
+    // let _guard = chrometracer::builder().init();
 
     let mut handles = vec![];
     for _ in 0..10 {
