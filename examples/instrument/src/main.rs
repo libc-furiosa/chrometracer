@@ -4,18 +4,20 @@ use std::{
 };
 
 #[chrometracer::instrument(name = format!("{}", "hello"), tid = 1)]
-fn hello() {
-    println!("Hello");
-}
+fn hello() {}
+
+#[chrometracer::instrument(event: "async", name = format!("{}", "bye"), tid = 1)]
+fn bye() {}
 
 fn main() {
-    // let _guard = chrometracer::builder().init();
+    let _guard = chrometracer::builder().init();
 
     let mut handles = vec![];
     for _ in 0..10 {
         handles.push(thread::spawn(|| {
             for _ in 0..10 {
                 hello();
+                bye();
             }
         }));
     }
