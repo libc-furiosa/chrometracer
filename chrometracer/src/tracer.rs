@@ -132,7 +132,7 @@ macro_rules! event {
                     $value.record(&mut builder, stringify!($key));
                 )*
 
-                let event = builder.pid(100).build().unwrap();
+                let event = builder.build().unwrap();
                 tracer.trace(event);
             }
         })
