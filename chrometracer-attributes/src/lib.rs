@@ -1,16 +1,89 @@
+use std::collections::HashSet;
+
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::ToTokens;
+use syn::ext::IdentExt;
 use syn::{
     parse::{Parse, ParseStream, Parser},
     parse_quote,
     punctuated::Punctuated,
-    Expr, LitStr, Path, Token,
+    Expr, Ident, LitInt, LitStr, Path, Token,
 };
 
+#[derive(Default)]
 struct ChromeEventArgs {
+    level: Option<Level>,
+    target: Option<LitStr>,
     event: Option<Event>,
-    fields: Punctuated<Field, Token![,]>,
+    fields: Fields,
+    skips: HashSet<Ident>,
+}
+
+#[derive(Default)]
+struct Fields(Punctuated<Field, Token![,]>);
+
+impl ToTokens for Fields {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        self.0.to_tokens(tokens)
+    }
+}
+
+impl Parse for Fields {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let _ = input.parse::<kw::fields>();
+        let content;
+        let _ = syn::parenthesized!(content in input);
+        let fields: Punctuated<_, Token![,]> = content.parse_terminated(Field::parse)?;
+        Ok(Self(fields))
+    }
+}
+
+#[derive(Clone)]
+enum Level {
+    Str(LitStr),
+    Int(LitInt),
+    Path(Path),
+}
+
+impl Parse for Level {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let _ = input.parse::<kw::level>()?;
+        let _ = input.parse::<Token![=]>()?;
+        let lookahead = input.lookahead1();
+        if lookahead.peek(LitStr) {
+            Ok(Self::Str(input.parse()?))
+        } else if lookahead.peek(LitInt) {
+            Ok(Self::Int(input.parse()?))
+        } else if lookahead.peek(Ident) {
+            Ok(Self::Path(input.parse()?))
+        } else {
+            Err(lookahead.error())
+        }
+    }
+}
+
+struct Skips(HashSet<Ident>);
+
+impl Parse for Skips {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let _ = input.parse::<kw::skip>();
+        let content;
+        let _ = syn::parenthesized!(content in input);
+        let names: Punctuated<Ident, Token![,]> = content.parse_terminated(Ident::parse_any)?;
+        let mut skips = HashSet::new();
+        for name in names {
+            if skips.contains(&name) {
+                return Err(syn::Error::new(
+                    name.span(),
+                    "tried to skip the same field twice",
+                ));
+            } else {
+                skips.insert(name);
+            }
+        }
+        Ok(Self(skips))
+    }
 }
 
 impl ToTokens for ChromeEventArgs {
@@ -21,15 +94,47 @@ impl ToTokens for ChromeEventArgs {
 
 impl Parse for ChromeEventArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        Ok(ChromeEventArgs {
-            event: {
-                if input.peek(kw::event) {
-                    Some(Event::parse(input)?)
-                } else {
-                    None
-                }
-            },
-            fields: input.parse_terminated(Field::parse)?,
+        let mut args = Self::default();
+
+        while !input.is_empty() {
+            let lookahead = input.lookahead1();
+            if lookahead.peek(kw::event) {
+                args.event = Some(Event::parse(input)?);
+            } else if lookahead.peek(kw::level) {
+                args.level = Some(Level::parse(input)?)
+            } else if lookahead.peek(kw::fields) {
+                args.fields = Fields::parse(input)?;
+            } else if lookahead.peek(kw::skip) {
+                let Skips(skips) = input.parse()?;
+                args.skips = skips;
+            } else if lookahead.peek(kw::target) {
+                let target = input.parse::<StrArg<kw::target>>()?.value;
+                args.target = Some(target);
+            } else if lookahead.peek(Token![,]) {
+                let _ = input.parse::<Token![,]>()?;
+            } else {
+                panic!(
+                    "Unknown fields, expected one of \"event\", \"level\", \"fields\", \"skip\", \"target\"",
+                )
+            }
+        }
+        Ok(args)
+    }
+}
+
+struct StrArg<T> {
+    value: LitStr,
+    _p: std::marker::PhantomData<T>,
+}
+
+impl<T: Parse> Parse for StrArg<T> {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let _ = input.parse::<T>()?;
+        let _ = input.parse::<Token![=]>()?;
+        let value = input.parse()?;
+        Ok(Self {
+            value,
+            _p: std::marker::PhantomData,
         })
     }
 }
@@ -94,9 +199,9 @@ pub fn instrument(attr: TokenStream, item: TokenStream) -> TokenStream {
         .map(|e| e.event)
         .unwrap_or_else(|| LitStr::new("", Span::call_site()));
 
-    let fields = args.fields.iter();
-    let fields2 = args.fields.iter();
-    let fields3 = args.fields.iter();
+    let fields = args.fields.0.iter();
+    let fields2 = args.fields.0.iter();
+    let fields3 = args.fields.0.iter();
 
     let mut input = syn::Item::parse.parse(item).unwrap();
 
@@ -114,16 +219,16 @@ pub fn instrument(attr: TokenStream, item: TokenStream) -> TokenStream {
 
                 let ret = if let Some(event) = event {
                     chrometracer::event!(#(#fields,)* ph = event.0,
-                        ts = ::std::time::Instant::now().duration_since(start).as_nanos() as f64 / 1000.0);
+                        ts = ::std::time::SystemTime::now().duration_since(start).unwrap().as_nanos() as f64 / 1000.0);
                     let ret = #original;
                     chrometracer::event!(#(#fields2,)* ph = event.1,
-                        ts = ::std::time::Instant::now().duration_since(start).as_nanos() as f64 / 1000.0);
+                        ts = ::std::time::SystemTime::now().duration_since(start).unwrap().as_nanos() as f64 / 1000.0);
                     ret
                 } else {
-                    let now = ::std::time::Instant::now();
-                    let ts = now.duration_since(start).as_nanos() as f64 / 1000.0;
+                    let now = ::std::time::SystemTime::now();
+                    let ts = now.duration_since(start).unwrap().as_nanos() as f64 / 1000.0;
                     let ret = #original;
-                    let dur = ::std::time::Instant::now().duration_since(now).as_nanos() as f64 / 1000.0;
+                    let dur = ::std::time::SystemTime::now().duration_since(now).unwrap().as_nanos() as f64 / 1000.0;
 
                     chrometracer::event!(#(#fields3,)* ph = chrometracer::EventType::Complete, dur = dur, ts = ts);
                     ret
@@ -143,4 +248,8 @@ pub fn instrument(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 mod kw {
     syn::custom_keyword!(event);
+    syn::custom_keyword!(skip);
+    syn::custom_keyword!(fields);
+    syn::custom_keyword!(level);
+    syn::custom_keyword!(target);
 }

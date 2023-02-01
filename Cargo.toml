@@ -3,5 +3,6 @@
 members = [
     "chrometracer",
     "chrometracer-attributes",
-    "examples/instrument"
+    "examples/instrument",
+    "examples/instrument_async"
 ]

@@ -6,7 +6,7 @@ use std::{
     fs::File,
     io,
     thread::{self, JoinHandle},
-    time::Instant,
+    time::SystemTime,
 };
 use tracing_chrometrace::{ChromeEvent, ChromeEventBuilder, EventType};
 
@@ -19,8 +19,8 @@ static mut GLOBAL: Option<ChromeTracer> = None;
 #[derive(Builder, Clone)]
 #[builder(custom_constructor, build_fn(private, name = "_build"))]
 pub struct ChromeTracer {
-    #[builder(default = "Instant::now()")]
-    pub start: Instant,
+    #[builder(default = "SystemTime::now()")]
+    pub start: SystemTime,
 
     #[builder(setter(skip))]
     sender: Option<Sender<ChromeTracerMessage>>,
