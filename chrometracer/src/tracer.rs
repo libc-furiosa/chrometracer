@@ -4,11 +4,38 @@ use derive_builder::Builder;
 use std::{
     cell::RefCell,
     fs::File,
-    io,
+    io::{BufWriter, Write},
     thread::{self, JoinHandle},
-    time::SystemTime,
+    time::Instant,
 };
-use tracing_chrometrace::{ChromeEvent, ChromeEventBuilder, EventType};
+
+#[derive(Debug)]
+pub struct SlimEvent {
+    pub name: &'static str,
+    pub from: std::time::Duration,
+    pub to: std::time::Duration,
+    pub is_async: bool,
+    pub tid: u64,
+}
+
+impl SlimEvent {
+    fn write_json<W>(self, writer: &mut W)
+    where
+        W: std::io::Write
+    {
+        let pid = std::process::id();
+        let json = if self.is_async {
+            let begin = self.from.as_nanos() as f64 / 1000.0;
+            let end = self.to.as_nanos() as f64 / 1000.0;
+            format!("{{\"name\":\"{}\",\"ts\":{},\"pid\":{},\"tid\":{},\"id\":{},\"ph\":\"b\",\"cat\":\"async\"}},\n{{\"name\":\"{}\",\"ts\":{},\"pid\":{},\"tid\":{},\"id\":{},\"ph\":\"e\",\"cat\":\"async\"}}", self.name, begin, pid, self.tid, self.from.as_nanos(), self.name, end, pid, self.tid, self.from.as_nanos())
+        } else {
+            let ts = self.from.as_nanos() as f64 / 1000.0;
+            let dur = (self.to.as_nanos() - self.from.as_nanos()) as f64 / 1000.0;
+            format!("{{\"name\":\"{}\",\"ts\":{},\"dur\":{},\"pid\":{},\"tid\":{},\"ph\":\"X\"}}", self.name, ts, dur, std::process::id(), self.tid)
+        };
+        writer.write_all(json.as_bytes()).unwrap();
+    }
+}
 
 thread_local! {
     static CURRENT: RefCell<Option<ChromeTracer>> = RefCell::new(None);
@@ -19,16 +46,19 @@ static mut GLOBAL: Option<ChromeTracer> = None;
 #[derive(Builder, Clone)]
 #[builder(custom_constructor, build_fn(private, name = "_build"))]
 pub struct ChromeTracer {
-    #[builder(default = "SystemTime::now()")]
-    pub start: SystemTime,
+    #[builder(default = "Instant::now()")]
+    pub start: Instant,
 
     #[builder(setter(skip))]
     sender: Option<Sender<ChromeTracerMessage>>,
+
+    #[builder(default = "std::thread::current().id().as_u64().into()")]
+    pub tid: u64,
 }
 
 #[allow(clippy::large_enum_variant)]
 enum ChromeTracerMessage {
-    ChromeEvent(ChromeEvent),
+    ChromeEvent(SlimEvent),
     Terminate,
 }
 
@@ -72,31 +102,31 @@ impl ChromeTracer {
         self.sender = Some(sender.clone());
 
         let handle = Some(thread::spawn(move || {
-            let mut file = File::create("trace.json").unwrap();
+            let mut writer = BufWriter::new(File::create("trace.json").unwrap());
             let queue = ArrayQueue::new(1);
 
-            io::Write::write_all(&mut file, b"[\n").unwrap();
+            writer.write_all(b"[\n").unwrap();
 
             while let Ok(ChromeTracerMessage::ChromeEvent(event)) = receiver.recv() {
-                let s = serde_json::to_string(&event).unwrap();
-                if let Some(e) = queue.force_push(s) {
-                    io::Write::write_all(&mut file, e.as_bytes()).unwrap();
-                    io::Write::write_all(&mut file, b",\n").unwrap();
+                if let Some(e) = queue.force_push(event) {
+                    e.write_json(&mut writer);
+                    writer.write_all(b",\n").unwrap();
                 };
             }
 
             if let Some(e) = queue.pop() {
-                io::Write::write_all(&mut file, e.as_bytes()).unwrap();
-                io::Write::write_all(&mut file, b"\n").unwrap();
+                e.write_json(&mut writer);
+                writer.write_all(b"\n").unwrap();
             }
 
-            io::Write::write_all(&mut file, b"]").unwrap();
+            writer.write_all(b"]").unwrap();
         }));
 
         ChromeTracerGuard { sender, handle }
     }
 
-    pub fn trace(&self, event: ChromeEvent) {
+    #[inline]
+    pub fn trace(&self, event: SlimEvent) {
         let _ = self
             .sender
             .as_ref()
@@ -112,6 +142,7 @@ where
         let mut tracer = c.borrow_mut();
         if tracer.is_none() {
             *tracer = unsafe { GLOBAL.clone() };
+            tracer.as_mut().map(|t| t.tid = std::thread::current().id().as_u64().into());
         }
 
         f(tracer.as_ref())
@@ -120,104 +151,36 @@ where
 
 #[macro_export]
 macro_rules! event {
-    ($($key:ident = $value:expr),*) => {
+    (name: $name:expr, from: $from:expr, to: $to:expr, is_async: $is_async:expr) => {
 
         $crate::current(|tracer| {
             if let Some(tracer) = tracer {
-                use $crate::Recordable as _;
+                let event = $crate::SlimEvent {
+                    name: $name,
+                    from: $from,
+                    to: $to,
+                    is_async: $is_async,
+                    tid: tracer.tid,
+                };
 
-                let mut builder = $crate::ChromeEvent::builder(tracer.start);
-
-                $(
-                    $value.record(&mut builder, stringify!($key));
-                )*
-
-                let event = builder.build().unwrap();
                 tracer.trace(event);
             }
         })
     };
 }
 
-pub trait Recordable {
-    type Item;
-
-    fn record(self, builder: &mut ChromeEventBuilder, name: &'static str);
-}
-
-impl Recordable for u64 {
-    type Item = u64;
-
-    fn record(self, builder: &mut ChromeEventBuilder, name: &'static str) {
-        match name {
-            "tid" => builder.tid(self),
-            "pid" => builder.pid(self),
-            _ => builder.arg((name.to_string(), self.to_string())),
-        };
-    }
-}
-
-impl Recordable for &'static str {
-    type Item = &'static str;
-
-    fn record(self, builder: &mut ChromeEventBuilder, name: &'static str) {
-        match name {
-            "name" => builder.name(self),
-            "cat" => builder.cat(self),
-            "id" => builder.id(self),
-            _ => builder.arg((name.to_string(), self.to_string())),
-        };
-    }
-}
-
-impl Recordable for String {
-    type Item = String;
-
-    fn record(self, builder: &mut ChromeEventBuilder, name: &'static str) {
-        match name {
-            "name" => builder.name(self),
-            "cat" => builder.cat(self),
-            "id" => builder.id(self),
-            _ => builder.arg((name.to_string(), self)),
-        };
-    }
-}
-
-impl Recordable for f64 {
-    type Item = f64;
-
-    fn record(self, builder: &mut ChromeEventBuilder, name: &'static str) {
-        match name {
-            "ts" => builder.ts(self),
-            "dur" => builder.dur(Some(self)),
-            "tts" => builder.tts(Some(self)),
-            _ => builder.arg((name.to_string(), self.to_string())),
-        };
-    }
-}
-
-impl Recordable for EventType {
-    type Item = EventType;
-
-    fn record(self, builder: &mut ChromeEventBuilder, name: &'static str) {
-        match name {
-            "ph" => builder.ph(self),
-            _ => builder.arg((name.to_string(), self.as_ref().to_string())),
-        };
-    }
-}
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn event() {
-        crate::builder().init();
+        let _guard = crate::builder().init();
 
-        event!(name = "hello");
+        event!(name: "hello", from: std::time::Duration::from_secs(1), to: std::time::Duration::from_secs(2), is_async: true);
     }
 
     #[test]
     fn without_init() {
-        event!(name = "hello");
+        event!(name: "hello", from: std::time::Duration::from_secs(1), to: std::time::Duration::from_secs(2), is_async: false);
     }
 }

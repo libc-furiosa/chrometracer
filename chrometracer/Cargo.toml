@@ -21,3 +21,10 @@ chrometracer-attributes = { path = "../chrometracer-attributes", version = "0.1.
 crossbeam-channel = "0.5.6"
 crossbeam-queue = "0.3.6"
 tracing-chrometrace = "0.1.19"
+
+[dev-dependencies]
+criterion = "0.4"
+
+[[bench]]
+name = "benchmark"
+harness = false
