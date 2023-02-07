@@ -134,6 +134,7 @@ impl ChromeTracer {
     }
 }
 
+#[inline]
 pub fn current<T, F>(mut f: F) -> T
 where
     F: FnMut(Option<&ChromeTracer>) -> T,
@@ -149,16 +150,27 @@ where
     })
 }
 
+pub struct Span {
+    pub name: &'static str,
+    pub from: std::time::Duration,
+    pub is_async: bool,
+}
+
+impl Drop for Span {
+    fn drop(&mut self) {
+        crate::event!(name: self.name, from: self.from, is_async: self.is_async);
+    }
+}
+
 #[macro_export]
 macro_rules! event {
-    (name: $name:expr, from: $from:expr, to: $to:expr, is_async: $is_async:expr) => {
-
+    (name: $name:expr, from: $from:expr, is_async: $is_async:expr) => {
         $crate::current(|tracer| {
             if let Some(tracer) = tracer {
                 let event = $crate::SlimEvent {
                     name: $name,
                     from: $from,
-                    to: $to,
+                    to: tracer.start.elapsed(),
                     is_async: $is_async,
                     tid: tracer.tid,
                 };
@@ -176,11 +188,11 @@ mod tests {
     fn event() {
         let _guard = crate::builder().init();
 
-        event!(name: "hello", from: std::time::Duration::from_secs(1), to: std::time::Duration::from_secs(2), is_async: true);
+        event!(name: "hello", from: std::time::Duration::from_secs(1), is_async: true);
     }
 
     #[test]
     fn without_init() {
-        event!(name: "hello", from: std::time::Duration::from_secs(1), to: std::time::Duration::from_secs(2), is_async: false);
+        event!(name: "hello", from: std::time::Duration::from_secs(1), is_async: false);
     }
 }

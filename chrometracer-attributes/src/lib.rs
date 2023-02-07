@@ -18,12 +18,12 @@ pub fn instrument(_attr: TokenStream, item: TokenStream) -> TokenStream {
             let start = chrometracer::current(|tracer| tracer.map(|t| t.start));
 
             if let Some(start) = start {
-                let from = start.elapsed();
-                let ret = #original;
-                let to = start.elapsed();
-                chrometracer::event!(name: stringify!(#name), from: from, to: to, is_async: #is_async);
-
-                ret
+                let span = chrometracer::Span {
+                    name: stringify!(#name),
+                    from: start.elapsed(),
+                    is_async: #is_async,
+                };
+                #original
             } else {
                 #original
             }
